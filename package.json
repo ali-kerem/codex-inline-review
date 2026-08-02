@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "experimental-local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ali-kerem/codex-inline-review.git"
+  },
+  "homepage": "https://github.com/ali-kerem/codex-inline-review#readme",
+  "bugs": {
+    "url": "https://github.com/ali-kerem/codex-inline-review/issues"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

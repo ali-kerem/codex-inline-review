@@ -11,6 +11,24 @@ Codex Inline Review is an experimental workspace extension for VS Code and Curso
 
 The extension does not use Git, SCM, Cursor databases, private editor commands, proposed VS Code APIs, or telemetry. It never submits prompts and does not start a second Codex client.
 
+## Screenshots
+
+**Sidebar and inline block review**
+
+![Codex Review sidebar beside an inline block review](docs/images/sidebar-inline-review.png)
+
+**Pending-file actions**
+
+![Context menu actions for a pending file](docs/images/pending-file-actions.png)
+
+**Full Codex diff**
+
+![Full original-to-Codex diff](docs/images/full-codex-diff.png)
+
+**Accepted changes only**
+
+![Diff containing only accepted changes](docs/images/accepted-changes-diff.png)
+
 ## Installation
 
 Download `codex-inline-review-0.1.0.vsix` from the latest GitHub Release, then run **Extensions: Install from VSIX...** in VS Code or Cursor and reload the window.
