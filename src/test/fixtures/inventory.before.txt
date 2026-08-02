@@ -1,0 +1,11 @@
+class Inventory:
+    def __init__(self):
+        self.items = {}
+
+    def add_item(self, name: str, quantity: int) -> None:
+        current_quantity = self.items.get(name, 0)
+        self.items[name] = current_quantity + quantity
+
+inventory = Inventory()
+inventory.add_item("Keyboard", 12)
+inventory.print_report()

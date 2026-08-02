@@ -1,0 +1,196 @@
+{
+  "name": "codex-inline-review",
+  "displayName": "Codex Inline Review (Experimental)",
+  "description": "Review file edits from existing Codex sessions with inline decorations and safe Keep/Undo controls.",
+  "version": "0.1.0",
+  "publisher": "experimental-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "codexInlineReview.keepFile", "title": "Codex Review: Keep File", "icon": "$(check)" },
+      { "command": "codexInlineReview.undoFile", "title": "Codex Review: Undo File", "icon": "$(discard)" },
+      { "command": "codexInlineReview.keepBlock", "title": "Codex Review: Keep Change" },
+      { "command": "codexInlineReview.undoBlock", "title": "Codex Review: Undo Change" },
+      { "command": "codexInlineReview.keepAll", "title": "Codex Review: Keep All" },
+      { "command": "codexInlineReview.undoAll", "title": "Codex Review: Undo All" },
+      { "command": "codexInlineReview.keepTurn", "title": "Codex Review: Keep All Changes in Turn", "icon": "$(check-all)" },
+      { "command": "codexInlineReview.discardTurn", "title": "Codex Review: Discard All Changes in Turn", "icon": "$(discard)" },
+      { "command": "codexInlineReview.redoTurn", "title": "Codex Review: Redo All Discarded Changes in Turn", "icon": "$(redo)" },
+      { "command": "codexInlineReview.discardFile", "title": "Codex Review: Discard File Changes", "icon": "$(discard)" },
+      { "command": "codexInlineReview.redoFile", "title": "Codex Review: Redo Discarded File Changes", "icon": "$(redo)" },
+      { "command": "codexInlineReview.openDiff", "title": "Codex Review: Open Full Diff", "icon": "$(diff)" },
+      { "command": "codexInlineReview.openAcceptedDiff", "title": "Codex Review: Open Accepted Diff", "icon": "$(diff-added)" },
+      { "command": "codexInlineReview.openInlineReview", "title": "Codex Review: Open Inline Review", "icon": "$(open-preview)" },
+      { "command": "codexInlineReview.showPendingChanges", "title": "Codex Review: Show Pending Changes" },
+      { "command": "codexInlineReview.importRecentEvents", "title": "Codex Review: Import Recent Events" },
+      { "command": "codexInlineReview.showOutput", "title": "Codex Review: Show Output" },
+      { "command": "codexInlineReview.showDiagnostics", "title": "Codex Review: Show Diagnostics" },
+      { "command": "codexInlineReview.revealFile", "title": "Codex Review: Reveal File" }
+    ],
+    "configuration": {
+      "title": "Codex Inline Review",
+      "properties": {
+        "codexInlineReview.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Watch Codex rollout files and show pending reviews."
+        },
+        "codexInlineReview.codexHome": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute Codex home path. Overrides CODEX_HOME and the host user's ~/.codex."
+        },
+        "codexInlineReview.pollIntervalMs": {
+          "type": "number",
+          "default": 750,
+          "minimum": 250,
+          "description": "Rollout polling interval in milliseconds. Values below 250 are clamped."
+        },
+        "codexInlineReview.importRecentSeconds": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Seconds of existing rollout history to import at activation. Zero starts at EOF and processes only new events."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexInlineReview",
+          "title": "Codex Review",
+          "icon": "resources/review.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexInlineReview": [
+        {
+          "id": "codexInlineReview.pendingChanges",
+          "name": "Changes"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codexInlineReview.openInlineReview",
+          "when": "config.codexInlineReview.enabled && editorTextFocus",
+          "group": "navigation@23"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "codexInlineReview.openInlineReview",
+          "when": "config.codexInlineReview.enabled && editorTextFocus",
+          "group": "navigation@30"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "codexInlineReview.keepAll",
+          "when": "view == codexInlineReview.pendingChanges",
+          "group": "navigation@10"
+        },
+        {
+          "command": "codexInlineReview.undoAll",
+          "when": "view == codexInlineReview.pendingChanges",
+          "group": "navigation@11"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "codexInlineReview.keepTurn",
+          "when": "view == codexInlineReview.pendingChanges && viewItem == codexReview.turn.active",
+          "group": "turn@10"
+        },
+        {
+          "command": "codexInlineReview.discardTurn",
+          "when": "view == codexInlineReview.pendingChanges && viewItem == codexReview.turn.active",
+          "group": "turn@20"
+        },
+        {
+          "command": "codexInlineReview.redoTurn",
+          "when": "view == codexInlineReview.pendingChanges && viewItem == codexReview.turn.active",
+          "group": "turn@30"
+        },
+        {
+          "command": "codexInlineReview.openInlineReview",
+          "when": "view == codexInlineReview.pendingChanges && viewItem =~ /codexReview.file.active.pending/",
+          "group": "navigation@10"
+        },
+        {
+          "command": "codexInlineReview.openDiff",
+          "when": "view == codexInlineReview.pendingChanges && viewItem =~ /codexReview.file./",
+          "group": "navigation@20"
+        },
+        {
+          "command": "codexInlineReview.openAcceptedDiff",
+          "when": "view == codexInlineReview.pendingChanges && viewItem =~ /codexReview.file.(archived.*.acceptedSubset|active.pending.acceptedSubset|active.partiallyAccepted.acceptedSubset)/",
+          "group": "navigation@30"
+        },
+        {
+          "command": "codexInlineReview.keepFile",
+          "when": "view == codexInlineReview.pendingChanges && viewItem =~ /codexReview.file.active.pending/",
+          "group": "review@10"
+        },
+        {
+          "command": "codexInlineReview.discardFile",
+          "when": "view == codexInlineReview.pendingChanges && viewItem =~ /codexReview.file.active.pending/",
+          "group": "review@20"
+        },
+        {
+          "command": "codexInlineReview.redoFile",
+          "when": "view == codexInlineReview.pendingChanges && viewItem =~ /codexReview.file.active.discarded/",
+          "group": "review@10"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "codexInlineReview.smartUndo",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "editorTextFocus && resourceScheme == codex-review && config.codexInlineReview.enabled"
+      },
+      {
+        "command": "codexInlineReview.smartRedo",
+        "key": "ctrl+y",
+        "mac": "cmd+shift+z",
+        "linux": "ctrl+shift+z",
+        "when": "editorTextFocus && resourceScheme == codex-review && config.codexInlineReview.enabled"
+      },
+      {
+        "command": "codexInlineReview.smartRedo",
+        "key": "ctrl+shift+z",
+        "win": "ctrl+shift+z",
+        "when": "editorTextFocus && resourceScheme == codex-review && config.codexInlineReview.enabled"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.7.2"
+  }
+}

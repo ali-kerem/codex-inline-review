@@ -1,0 +1,14 @@
+class Inventory:
+    def __init__(self):
+        self.items = {}
+
+    def add_item(self, name: str, quantity: int) -> None:
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+
+        current_quantity = self.items.get(name, 0)
+        self.items[name] = current_quantity + quantity
+
+inventory = Inventory()
+inventory.add_item("Keyboard", 12)
+inventory.print_report()

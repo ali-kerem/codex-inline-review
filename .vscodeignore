@@ -1,0 +1,15 @@
+.github/**
+.gitignore
+.vscode/**
+src/**
+test/**
+**/*.test.*
+**/fixtures/**
+**/*.map
+node_modules/**
+log.jsonl
+*.jsonl
+*.log
+.DS_Store
+tsconfig.json
+package-lock.json

@@ -1,0 +1,82 @@
+[
+  {
+    "timestamp": "2026-08-01T22:19:54.048Z",
+    "type": "event_msg",
+    "payload": {
+      "type": "patch_apply_end",
+      "call_id": "call-one",
+      "turn_id": "turn-one",
+      "success": true,
+      "status": "completed",
+      "changes": {
+        "/workspace/inventory.py": {
+          "type": "update",
+          "unified_diff": "@@ -5,2 +5,5 @@\n     def add_item(self, name: str, quantity: int) -> None:\n+        if quantity <= 0:\n+            raise ValueError(\"quantity must be positive\")\n+\n         current_quantity = self.items.get(name, 0)\n@@ -10,2 +13,2 @@\n inventory.add_item(\"Keyboard\", 12)\n-inventory.print_report()\n\\ No newline at end of file\n+inventory.print_report()\n",
+          "move_path": null
+        }
+      }
+    }
+  },
+  {
+    "timestamp": "2026-08-01T22:29:32.520Z",
+    "type": "event_msg",
+    "payload": {
+      "type": "patch_apply_end",
+      "call_id": "call-multi-hunk",
+      "turn_id": "turn-multi-hunk",
+      "success": true,
+      "status": "completed",
+      "changes": {
+        "/workspace/analyze logs.py": {
+          "type": "update",
+          "unified_diff": "@@ -1,2 +1,3 @@\n alpha\n+inserted one\n beta\n@@ -4,2 +5,3 @@\n delta\n+inserted two\n epsilon\n",
+          "move_path": null
+        }
+      }
+    }
+  },
+  {
+    "timestamp": "2026-08-01T22:30:06.026Z",
+    "type": "event_msg",
+    "payload": {
+      "type": "patch_apply_end",
+      "call_id": "call-two-files",
+      "turn_id": "turn-two-files",
+      "success": true,
+      "status": "completed",
+      "changes": {
+        "/workspace/analyze logs.py": {
+          "type": "update",
+          "unified_diff": "@@ -1 +1,2 @@\n alpha\n+beta\n",
+          "move_path": null
+        },
+        "/workspace/inventory.py": {
+          "type": "update",
+          "unified_diff": "@@ -1 +1,2 @@\n alpha\n+beta\n",
+          "move_path": null
+        }
+      }
+    }
+  },
+  {
+    "timestamp": "2026-08-01T22:30:42.101Z",
+    "type": "event_msg",
+    "payload": {
+      "type": "patch_apply_end",
+      "call_id": "call-add-delete",
+      "turn_id": "turn-add-delete",
+      "success": true,
+      "status": "completed",
+      "changes": {
+        "/workspace/removed.py": {
+          "type": "delete",
+          "content": "print(\"removed\")\n"
+        },
+        "/workspace/created.py": {
+          "type": "add",
+          "content": "print(\"created\")\n"
+        }
+      }
+    }
+  }
+]
