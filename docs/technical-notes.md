@@ -6,7 +6,11 @@ The extension passively reads Codex rollout JSONL files from `$CODEX_HOME/sessio
 
 The public [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) is the preferred future integration point. App-server notifications such as `item/completed` and `turn/diff/updated` do not use the same schema as persisted rollout records. The extension therefore normalizes both formats behind adapters and a shared `ChangeBatch` model. It does not start another app-server because that separate process would not receive events from the Codex session already owned by the installed Codex extension.
 
-The rollout watcher tails only relevant session files, handles partial lines and file replacement, deduplicates patch events, detects fork boundaries, and accepts only completed successful changes inside the open workspace.
+The rollout watcher tails only relevant session files, handles partial lines and file replacement, deduplicates patch events, detects fork boundaries, and accepts only completed successful changes inside the open workspace. Automatic discovery checks a bounded seven-day directory window once at startup, then keeps byte-offset checkpoints for every discovered rollout and follows only appended bytes. This lets a still-active older session coexist with a newer rollout without repeatedly scanning or parsing the complete sessions tree.
+
+**Codex Review: Watch Session by ID** performs an explicit one-time search for the exact UUID in rollout filenames, reads the selected rollout from the beginning, and rebuilds every completed file-change turn. Reconstruction walks the changes backward from the current workspace state, then composes multiple patch events belonging to the same turn. Older turns become read-only archives and only the final turn remains interactive. Prompt-only turns contain no file changes and therefore have no review node.
+
+Per-block decisions are keyed to immutable hashes of the complete proposal's change blocks and stored per workspace, Codex home, and selected session. This restores Pending, Accepted, Partially Accepted, and Discarded classifications after reload without persisting file contents. Existing in-memory snapshots take precedence when the same session is selected again. **Codex Review: Stop Watching Session by ID** clears the pin and resumes bounded automatic discovery.
 
 ## Rendering approach
 
@@ -30,7 +34,7 @@ A file remains Pending while any block still needs a decision. After every block
 
 If a later patch in the same turn modifies an already pending file, the extension composes it only when the previous post-edit hash exactly matches the next inferred original. Otherwise the review becomes conflicted.
 
-Review source contents and hashes remain in extension-host memory. Only rollout path, identity, and offset checkpoints are stored in workspace state.
+Review source contents and content hashes remain in extension-host memory. Rollout path, identity, byte-offset checkpoints, selected session ID, and content-free review block IDs are stored in workspace state.
 
 ## Keep, discard, undo, and redo safety
 
@@ -55,7 +59,7 @@ Codex home is resolved in this order:
 2. `CODEX_HOME` in the extension host;
 3. `path.join(os.homedir(), ".codex")` in the extension host.
 
-With `codexInlineReview.importRecentSeconds: 0`, activation starts existing rollout files at EOF. **Codex Review: Import Recent Events** explicitly imports a recent window. The watcher monitors the current date directory and handles day rollover without repeatedly scanning the complete sessions tree.
+With `codexInlineReview.importRecentSeconds: 0`, newly discovered existing rollout files start at EOF, while valid stored checkpoints resume from their last byte offsets. **Codex Review: Import Recent Events** explicitly imports a recent time window. The watcher monitors the current date directory, handles day rollover, and retains already tracked older rollouts without repeatedly scanning the complete sessions tree.
 
 Forked Codex threads are detected from the persisted `session_meta.forked_from_id` marker. Copied parent events are suppressed, while genuine edits created after the fork continue to produce reviews.
 
@@ -65,7 +69,7 @@ The extension declares `"extensionKind": ["workspace"]` and runs in the Remote S
 
 The watcher can see only sessions stored in the same environment as the extension host. If Codex writes sessions locally while the extension runs remotely, those local files are not visible. **Codex Review: Show Diagnostics** reports this limitation.
 
-Diagnostics contain only the extension-host kind, remote name, resolved Codex home, watched directory, newest rollout path, last processed byte offset, and pending-review count. They do not contain prompts, reasoning, diffs, or file contents.
+Diagnostics contain only the extension-host kind, remote name, resolved Codex home, watched directory, automatic or pinned watch mode, pinned rollout path, tracked rollout count, newest rollout path, last processed byte offset, and pending-review count. They do not contain prompts, reasoning, diffs, or file contents.
 
 ## Development and packaging
 

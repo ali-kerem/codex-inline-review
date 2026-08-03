@@ -2,9 +2,13 @@ import type * as vscode from "vscode";
 import {
   computeReviewBlocks,
   computeReviewMarkers,
+  joinText,
+  materializePostFromMixedContent,
   resolveReviewBlock,
   reverseApplyUnifiedDiff,
   reviewMarkersFromUnifiedDiff,
+  splitText,
+  type ReviewBlock,
   type ReviewMarkers,
 } from "./diff";
 import { hashText } from "./hash";
@@ -12,6 +16,11 @@ import type { ChangeBatch, ChangeKind, FileChange } from "./model";
 
 export type ReviewStatus = "pending" | "kept" | "undone" | "reconstructionFailed" | "conflicted";
 export type ReviewCategory = "pending" | "accepted" | "partiallyAccepted" | "discarded";
+export type ReviewBlockDecision = "keep" | "undo";
+
+export interface StoredReviewDecision {
+  blockDecisions: Record<string, ReviewBlockDecision>;
+}
 
 export interface ReviewFile {
   key: string;
@@ -30,6 +39,8 @@ export interface ReviewFile {
   fullPostContent?: string | null;
   originalHash?: string;
   postHash?: string;
+  /** Content-free decisions keyed by immutable blocks from the full proposal. */
+  blockDecisions?: Record<string, ReviewBlockDecision>;
   markers: ReviewMarkers;
 }
 
@@ -53,12 +64,69 @@ export function cloneReviewFile(file: ReviewFile): ReviewFile {
   return {
     ...file,
     turnIds: [...file.turnIds],
+    ...(file.blockDecisions ? { blockDecisions: { ...file.blockDecisions } } : {}),
     markers: {
       addedLines: [...file.markers.addedLines],
       deletions: file.markers.deletions.map((deletion) => ({ ...deletion })),
       firstChangedLine: file.markers.firstChangedLine,
     },
   };
+}
+
+function contentMatches(left: string | null, right: string | null): boolean {
+  return left === null || right === null ? left === right : hashText(left) === hashText(right);
+}
+
+function immutableBlocks(file: ReviewFile): ReviewBlock[] {
+  return computeReviewBlocks(fullOriginalContent(file) ?? "", fullPostContent(file) ?? "");
+}
+
+function arraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function immutableBlockId(file: ReviewFile, current: ReviewBlock): string | undefined {
+  const decisions = file.blockDecisions ?? {};
+  const candidates = immutableBlocks(file).filter((block) => decisions[block.id] === undefined);
+  return candidates.find((block) => block.id === current.id)?.id
+    ?? candidates
+      .filter((block) => arraysEqual(block.originalLines, current.originalLines) && arraysEqual(block.postLines, current.postLines))
+      .sort((left, right) => (
+        Math.abs(left.originalStart - current.originalStart) + Math.abs(left.postStart - current.postStart)
+      ) - (
+        Math.abs(right.originalStart - current.originalStart) + Math.abs(right.postStart - current.postStart)
+      ))[0]?.id;
+}
+
+function materializeDecisionSide(
+  originalContent: string,
+  postContent: string,
+  blocks: ReviewBlock[],
+  decisions: Record<string, ReviewBlockDecision>,
+  side: "original" | "post",
+): string {
+  const original = splitText(originalContent);
+  const post = splitText(postContent);
+  const target = side === "original" ? original : post;
+  const selected = blocks
+    .filter((block) => decisions[block.id] === (side === "original" ? "keep" : "undo"))
+    .sort((left, right) => side === "original" ? right.originalStart - left.originalStart : right.postStart - left.postStart);
+  for (const block of selected) {
+    const touchesBothEnds = block.originalStart + block.originalLines.length === original.lines.length
+      && block.postStart + block.postLines.length === post.lines.length;
+    if (side === "original") {
+      target.lines.splice(block.originalStart, block.originalLines.length, ...block.postLines);
+      if (touchesBothEnds) {
+        target.finalNewline = post.finalNewline;
+      }
+    } else {
+      target.lines.splice(block.postStart, block.postLines.length, ...block.originalLines);
+      if (touchesBothEnds) {
+        target.finalNewline = original.finalNewline;
+      }
+    }
+  }
+  return joinText(target);
 }
 
 function stateMatches(previousPost: string | null, nextOriginal: string | null): boolean {
@@ -123,6 +191,18 @@ function composedKind(original: string | null, post: string | null, moveUri?: vs
   return "update";
 }
 
+interface HistoricalOccurrence {
+  batch: ChangeBatch;
+  change: FileChange;
+  originalContent?: string | null;
+  postContent?: string | null;
+  error?: string;
+}
+
+function reviewKey(turnId: string, uri: vscode.Uri): string {
+  return JSON.stringify([turnId, uri.toString()]);
+}
+
 export class ReviewStore {
   private readonly files = new Map<string, ReviewFile>();
   private readonly turns = new Map<string, ReviewTurn>();
@@ -184,6 +264,155 @@ export class ReviewStore {
   public findByUri(uri: vscode.Uri): ReviewFile | undefined {
     const value = uri.toString();
     return this.activeFiles().find((file) => file.uri.toString() === value || file.moveUri?.toString() === value);
+  }
+
+  public storedReviewDecisions(): Record<string, StoredReviewDecision> {
+    const stored: Record<string, StoredReviewDecision> = {};
+    for (const file of this.files.values()) {
+      if (file.blockDecisions && Object.keys(file.blockDecisions).length > 0) {
+        stored[file.key] = { blockDecisions: { ...file.blockDecisions } };
+      }
+    }
+    return stored;
+  }
+
+  public async ingestSessionHistory(
+    batches: ChangeBatch[],
+    storedDecisions: Record<string, StoredReviewDecision> = {},
+  ): Promise<void> {
+    const history = batches.filter((batch) => batch.changes.length > 0);
+    if (history.length === 0) {
+      this.clear();
+      return;
+    }
+
+    const preserved = new Map([...this.files.values()].map((file) => [file.key, cloneReviewFile(file)] as const));
+    const states = new Map<string, string | null>();
+    for (const file of [...this.files.values()].sort((left, right) => left.timestamp.localeCompare(right.timestamp))) {
+      const post = fullPostContent(file);
+      if (file.kind === "move" && file.moveUri) {
+        states.set(file.uri.toString(), null);
+        states.set(file.moveUri.toString(), post);
+      } else {
+        states.set(file.uri.toString(), post);
+      }
+    }
+    const readState = async (uri: vscode.Uri): Promise<string | null> => {
+      const key = uri.toString();
+      if (!states.has(key)) {
+        states.set(key, await this.access.readText(uri));
+      }
+      return states.get(key) ?? null;
+    };
+
+    const occurrences: HistoricalOccurrence[] = history.flatMap((batch) => batch.changes.map((change) => ({ batch, change })));
+    for (let index = occurrences.length - 1; index >= 0; index -= 1) {
+      const occurrence = occurrences[index];
+      if (!occurrence) {
+        continue;
+      }
+      try {
+        const change = occurrence.change;
+        if (change.kind === "delete") {
+          const current = await readState(change.uri);
+          const original = reverseApplyUnifiedDiff("", change.unifiedDiff).original;
+          if (current !== null && !contentMatches(current, original)) {
+            throw new Error("The current file does not match either side of the historical deletion.");
+          }
+          occurrence.originalContent = original;
+          occurrence.postContent = null;
+          states.set(change.uri.toString(), original);
+          continue;
+        }
+        if (change.kind === "move") {
+          if (!change.moveUri) {
+            throw new Error("Historical move has no destination path.");
+          }
+          const source = await readState(change.uri);
+          const destination = await readState(change.moveUri);
+          const mixed = destination ?? source;
+          if (mixed === null) {
+            throw new Error("Neither side of the historical move currently exists.");
+          }
+          const post = materializePostFromMixedContent(mixed, change.unifiedDiff);
+          const original = reverseApplyUnifiedDiff(post, change.unifiedDiff).original;
+          occurrence.originalContent = original;
+          occurrence.postContent = post;
+          states.set(change.uri.toString(), original);
+          states.set(change.moveUri.toString(), null);
+          continue;
+        }
+
+        const current = await readState(change.uri);
+        const post = materializePostFromMixedContent(current ?? "", change.unifiedDiff);
+        const reconstructedOriginal = reverseApplyUnifiedDiff(post, change.unifiedDiff).original;
+        if (change.kind === "add" && reconstructedOriginal.length !== 0) {
+          throw new Error("Historical addition did not reconstruct an empty pre-edit side.");
+        }
+        occurrence.originalContent = change.kind === "add" ? null : reconstructedOriginal;
+        occurrence.postContent = post;
+        states.set(change.uri.toString(), occurrence.originalContent);
+      } catch (error) {
+        occurrence.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const grouped = new Map<string, HistoricalOccurrence[]>();
+    for (const occurrence of occurrences) {
+      const key = reviewKey(occurrence.batch.turnId, occurrence.change.uri);
+      const group = grouped.get(key) ?? [];
+      group.push(occurrence);
+      grouped.set(key, group);
+    }
+    const reconstructed = new Map<string, ReviewFile>();
+    for (const [key, group] of grouped) {
+      reconstructed.set(key, this.composeHistoricalFile(key, group));
+    }
+
+    const turnOrder: string[] = [];
+    const turnTimestamps = new Map<string, string>();
+    for (const batch of history) {
+      if (!turnTimestamps.has(batch.turnId)) {
+        turnOrder.push(batch.turnId);
+        turnTimestamps.set(batch.turnId, batch.timestamp);
+      }
+    }
+    const latestTurnId = turnOrder.at(-1);
+    this.files.clear();
+    this.turns.clear();
+    this.interactiveTurnId = latestTurnId;
+    for (const turnId of turnOrder) {
+      this.turns.set(turnId, { turnId, timestamp: turnTimestamps.get(turnId) ?? "", fileKeys: [] });
+    }
+    for (const occurrence of occurrences) {
+      const key = reviewKey(occurrence.batch.turnId, occurrence.change.uri);
+      const turn = this.turns.get(occurrence.batch.turnId);
+      if (!turn || turn.fileKeys.includes(key)) {
+        continue;
+      }
+      const historical = reconstructed.get(key);
+      if (!historical) {
+        continue;
+      }
+      const previous = preserved.get(key);
+      const preservedMatches = previous !== undefined
+        && contentMatches(fullOriginalContent(previous), fullOriginalContent(historical))
+        && contentMatches(fullPostContent(previous), fullPostContent(historical));
+      const file = preservedMatches ? previous : cloneReviewFile(historical);
+      if (!preservedMatches && storedDecisions[key]) {
+        this.restoreStoredDecision(file, storedDecisions[key]);
+      } else if (!preservedMatches && occurrence.batch.turnId !== latestTurnId) {
+        if (file.status === "pending") {
+          this.markKept(file);
+        } else if (file.status === "reconstructionFailed") {
+          file.status = "kept";
+          file.markers = { addedLines: [], deletions: [], firstChangedLine: 0 };
+        }
+      }
+      this.files.set(key, file);
+      turn.fileKeys.push(key);
+    }
+    this.emit();
   }
 
   public async ingest(batch: ChangeBatch): Promise<void> {
@@ -307,8 +536,19 @@ export class ReviewStore {
     for (const key of keys) {
       const file = this.files.get(key);
       if (file) {
-        file.status = status;
-        file.message = undefined;
+        if (status === "kept") {
+          this.markKept(file);
+        } else {
+          if (status === "undone") {
+            this.markUnresolvedBlocks(file, "undo");
+          } else if (status === "pending" && file.blockDecisions) {
+            file.blockDecisions = Object.fromEntries(
+              Object.entries(file.blockDecisions).filter(([, decision]) => decision !== "undo"),
+            );
+          }
+          file.status = status;
+          file.message = undefined;
+        }
         changed = true;
       }
     }
@@ -343,8 +583,138 @@ export class ReviewStore {
     this.emit();
   }
 
+  private composeHistoricalFile(key: string, group: HistoricalOccurrence[]): ReviewFile {
+    const first = group[0];
+    const last = group.at(-1);
+    if (!first || !last || group.some((occurrence) => occurrence.error !== undefined)
+      || first.originalContent === undefined) {
+      const message = group.find((occurrence) => occurrence.error)?.error ?? "Historical review content could not be reconstructed.";
+      const current = last?.postContent ?? null;
+      let markers: ReviewMarkers = { addedLines: [], deletions: [], firstChangedLine: 0 };
+      try {
+        markers = last ? reviewMarkersFromUnifiedDiff(last.change.unifiedDiff) : markers;
+      } catch {
+        // The reconstruction-failed state carries the actionable explanation.
+      }
+      return {
+        key,
+        uri: first?.change.uri ?? last!.change.uri,
+        ...(last?.change.moveUri ? { moveUri: last.change.moveUri } : {}),
+        kind: last?.change.kind ?? first?.change.kind ?? "update",
+        status: "reconstructionFailed",
+        message,
+        turnIds: [first?.batch.turnId ?? last!.batch.turnId],
+        timestamp: first?.batch.timestamp ?? last!.batch.timestamp,
+        originalContent: null,
+        postContent: current,
+        fullOriginalContent: null,
+        fullPostContent: current,
+        ...(current !== null ? { postHash: hashText(current) } : {}),
+        markers,
+      };
+    }
+
+    const original = first.originalContent;
+    let post = original;
+    let moveUri: vscode.Uri | undefined;
+    try {
+      for (const occurrence of group) {
+        const change = occurrence.change;
+        if (change.kind === "delete") {
+          const expected = reverseApplyUnifiedDiff("", change.unifiedDiff).original;
+          if (post === null || !contentMatches(post, expected)) {
+            throw new Error("Historical delete did not match the composed turn state.");
+          }
+          post = null;
+        } else if (change.kind === "add") {
+          if (post !== null) {
+            throw new Error("Historical add targeted a path that already existed in the composed turn state.");
+          }
+          post = materializePostFromMixedContent("", change.unifiedDiff);
+        } else {
+          if (post === null) {
+            throw new Error("Historical update targeted a path that did not exist in the composed turn state.");
+          }
+          post = materializePostFromMixedContent(post, change.unifiedDiff);
+          moveUri = change.kind === "move" ? change.moveUri : moveUri;
+        }
+      }
+      const markers = computeReviewMarkers(original ?? "", post ?? "");
+      return {
+        key,
+        uri: first.change.uri,
+        ...(moveUri ? { moveUri } : {}),
+        kind: composedKind(original, post, moveUri),
+        status: "pending",
+        turnIds: [first.batch.turnId],
+        timestamp: first.batch.timestamp,
+        originalContent: original,
+        postContent: post,
+        fullOriginalContent: original,
+        fullPostContent: post,
+        ...(original !== null ? { originalHash: hashText(original) } : {}),
+        ...(post !== null ? { postHash: hashText(post) } : {}),
+        markers,
+      };
+    } catch (error) {
+      return {
+        key,
+        uri: first.change.uri,
+        ...(moveUri ? { moveUri } : {}),
+        kind: last.change.kind,
+        status: "reconstructionFailed",
+        message: error instanceof Error ? error.message : String(error),
+        turnIds: [first.batch.turnId],
+        timestamp: first.batch.timestamp,
+        originalContent: null,
+        postContent: last.postContent ?? null,
+        fullOriginalContent: null,
+        fullPostContent: last.postContent ?? null,
+        ...(last.postContent !== undefined && last.postContent !== null ? { postHash: hashText(last.postContent) } : {}),
+        markers: { addedLines: [], deletions: [], firstChangedLine: 0 },
+      };
+    }
+  }
+
+  private restoreStoredDecision(file: ReviewFile, stored: StoredReviewDecision): void {
+    const blocks = immutableBlocks(file);
+    const blockIds = new Set(blocks.map((block) => block.id));
+    const decisions = Object.fromEntries(
+      Object.entries(stored.blockDecisions).filter(([blockId, decision]) => blockIds.has(blockId) && (decision === "keep" || decision === "undo")),
+    ) as Record<string, ReviewBlockDecision>;
+    if (Object.keys(decisions).length === 0) {
+      return;
+    }
+    const original = fullOriginalContent(file);
+    const post = fullPostContent(file);
+    const resolvedOriginal = materializeDecisionSide(original ?? "", post ?? "", blocks, decisions, "original");
+    const resolvedPost = materializeDecisionSide(original ?? "", post ?? "", blocks, decisions, "post");
+    const kept = Object.values(decisions).filter((decision) => decision === "keep").length;
+    const undone = Object.values(decisions).filter((decision) => decision === "undo").length;
+    file.blockDecisions = decisions;
+    file.originalContent = original === null && kept === 0 ? null : resolvedOriginal;
+    file.postContent = post === null && undone === 0 ? null : resolvedPost;
+    file.kind = composedKind(file.originalContent, file.postContent, file.moveUri);
+    if (file.originalContent === null) {
+      delete file.originalHash;
+    } else {
+      file.originalHash = hashText(file.originalContent);
+    }
+    if (file.postContent === null) {
+      delete file.postHash;
+    } else {
+      file.postHash = hashText(file.postContent);
+    }
+    const remaining = blocks.length - Object.keys(decisions).length;
+    file.markers = remaining > 0
+      ? computeReviewMarkers(file.originalContent ?? "", file.postContent ?? "")
+      : { addedLines: [], deletions: [], firstChangedLine: 0 };
+    file.status = remaining > 0 ? "pending" : undone > 0 ? "undone" : "kept";
+    file.message = undefined;
+  }
+
   private async reconstruct(change: FileChange, turnId: string, timestamp: string): Promise<ReviewFile> {
-    const key = JSON.stringify([turnId, change.uri.toString()]);
+    const key = reviewKey(turnId, change.uri);
     let current: string | null = null;
     try {
       if (change.kind === "move") {
@@ -430,9 +800,15 @@ export class ReviewStore {
     if (!file || file.status !== "pending" || file.kind === "move") {
       return false;
     }
+    const currentBlock = computeReviewBlocks(file.originalContent ?? "", file.postContent ?? "")
+      .find((candidate) => candidate.id === blockId);
+    const immutableId = currentBlock ? immutableBlockId(file, currentBlock) : undefined;
     const resolved = resolveReviewBlock(file.originalContent ?? "", file.postContent ?? "", blockId, resolution);
     if (!resolved) {
       return false;
+    }
+    if (immutableId) {
+      file.blockDecisions = { ...(file.blockDecisions ?? {}), [immutableId]: resolution };
     }
     if (resolution === "keep") {
       file.originalContent = resolved.originalContent;
@@ -461,6 +837,7 @@ export class ReviewStore {
   }
 
   private markKept(file: ReviewFile): void {
+    this.markUnresolvedBlocks(file, "keep");
     file.originalContent = file.postContent;
     if (file.originalContent === null) {
       delete file.originalHash;
@@ -470,6 +847,18 @@ export class ReviewStore {
     file.markers = { addedLines: [], deletions: [], firstChangedLine: 0 };
     file.status = "kept";
     file.message = undefined;
+  }
+
+  private markUnresolvedBlocks(file: ReviewFile, decision: ReviewBlockDecision): void {
+    const decisions = { ...(file.blockDecisions ?? {}) };
+    for (const block of immutableBlocks(file)) {
+      if (decisions[block.id] === undefined) {
+        decisions[block.id] = decision;
+      }
+    }
+    if (Object.keys(decisions).length > 0) {
+      file.blockDecisions = decisions;
+    }
   }
 
   private finalizeTurn(turnId: string): void {

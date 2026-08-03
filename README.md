@@ -12,6 +12,7 @@ Codex Inline Review adds a review workflow for file edits made by the existing C
 - Open the complete Codex diff or a diff containing only the changes you accepted.
 - Browse older turns as read-only archives without changing your current files.
 - Refuse unsafe discard operations when a file has changed since Codex edited it.
+- Follow an older active Codex session automatically or select one explicitly by its session ID.
 
 ## Screenshots
 
@@ -68,7 +69,7 @@ Pending files provide:
 - **Keep File**
 - **Discard File Changes**
 
-The active turn provides actions to keep, discard, or redo its changes. The sidebar title also provides **Keep All** and **Undo All** for all currently pending files.
+The active turn provides actions to keep, discard, or redo its changes. Workspace-wide **Keep All** and **Undo All** commands remain available from the Command Palette without occupying the sidebar title.
 
 Discard operations verify that files still match the captured Codex edit before restoring earlier content. If a file changed afterward, the operation is refused instead of overwriting newer work.
 
@@ -83,11 +84,23 @@ Discard operations verify that files still match the captured Codex edit before 
 
 Use **Codex Review: Import Recent Events** from the Command Palette if you want to import an earlier edit manually.
 
+### Choosing a Codex session
+
+Automatic mode discovers rollouts from the recent date directories and continues following every rollout it has already seen by byte offset. This allows an older chat that is still receiving edits to coexist with newer sessions without repeatedly reading complete JSONL files.
+
+To get a session ID, open the **⋯** menu at the top of the Codex chat pane in the right sidebar, then choose **Copy → Copy Session ID**.
+
+To follow that chat, run **Codex Review: Watch Session by ID** and enter the copied UUID. The sidebar is replaced with every completed file-change turn from that session. Older turns are read-only archives and the last turn remains interactive.
+
+Files you already reviewed retain their Accepted, Partially Accepted, or Discarded state. Files with unresolved blocks remain Pending. These decisions are remembered for the selected session using content-free block IDs; source contents and reconstructed snapshots remain in extension-host memory. The session choice is also remembered for this workspace.
+
+Run **Codex Review: Stop Watching Session by ID** to stop pinning that session and return to automatic discovery.
+
 ## Remote SSH
 
 The extension supports Remote SSH workspaces. Codex and this extension must run in the same environment because the extension can observe only the Codex sessions available to its extension host.
 
-If reviews do not appear remotely, run **Codex Review: Show Diagnostics** to see the resolved Codex home and watched session directory.
+If reviews do not appear remotely, run **Codex Review: Show Diagnostics** to see the resolved Codex home, watch mode, tracked rollout count, and selected rollout.
 
 ## Experimental status
 

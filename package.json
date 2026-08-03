@@ -43,6 +43,8 @@
       { "command": "codexInlineReview.openAcceptedDiff", "title": "Codex Review: Open Accepted Diff", "icon": "$(diff-added)" },
       { "command": "codexInlineReview.openInlineReview", "title": "Codex Review: Open Inline Review", "icon": "$(open-preview)" },
       { "command": "codexInlineReview.showPendingChanges", "title": "Codex Review: Show Pending Changes" },
+      { "command": "codexInlineReview.watchSessionById", "title": "Codex Review: Watch Session by ID" },
+      { "command": "codexInlineReview.stopWatchingSessionById", "title": "Codex Review: Stop Watching Session by ID" },
       { "command": "codexInlineReview.importRecentEvents", "title": "Codex Review: Import Recent Events" },
       { "command": "codexInlineReview.showOutput", "title": "Codex Review: Show Output" },
       { "command": "codexInlineReview.showDiagnostics", "title": "Codex Review: Show Diagnostics" },

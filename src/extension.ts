@@ -5,9 +5,16 @@ import { ReviewCodeLensProvider, ReviewRenderer } from "./renderer";
 import { actionMatchesSide, ReviewActionHistory, snapshotMatchesSide } from "./reviewActionHistory";
 import { blockActionMatchesState, ReviewBlockActionHistory } from "./reviewBlockActionHistory";
 import { interceptPendingReviewUndo } from "./pendingReviewUndo";
-import { hasPendingReviewBlocks, reviewCategory, ReviewStore, type ReviewFile } from "./reviewStore";
+import {
+  hasPendingReviewBlocks,
+  reviewCategory,
+  ReviewStore,
+  type ReviewFile,
+  type StoredReviewDecision,
+} from "./reviewStore";
 import { ReviewStatusBar, ReviewTreeProvider } from "./reviewTree";
 import { RolloutEventAdapter } from "./rolloutAdapter";
+import { normalizeSessionId } from "./rolloutDiscovery";
 import { RolloutEventSource, type CheckpointStorage } from "./rolloutSource";
 import { UndoController } from "./undoController";
 import {
@@ -21,6 +28,8 @@ import { WorkspaceFileAccess } from "./vscodeFiles";
 import { WorkspacePathGuard } from "./workspacePaths";
 
 const CHECKPOINT_KEY = "codexInlineReview.rolloutCheckpoints.v1";
+const PINNED_SESSION_KEY = "codexInlineReview.pinnedSessions.v1";
+const REVIEW_DECISIONS_KEY = "codexInlineReview.reviewDecisions.v1";
 
 function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("codexInlineReview");
@@ -56,6 +65,67 @@ class WorkspaceCheckpointStorage implements CheckpointStorage {
     const all = this.state.get<Record<string, Record<string, { identity: string; offset: number }>>>(CHECKPOINT_KEY, {});
     await this.state.update(CHECKPOINT_KEY, { ...all, [this.codexHome]: checkpoints });
   }
+}
+
+function pinnedSessionId(state: vscode.Memento, codexHome: string): string | undefined {
+  return state.get<Record<string, string>>(PINNED_SESSION_KEY, {})[codexHome];
+}
+
+async function savePinnedSessionId(state: vscode.Memento, codexHome: string, sessionId?: string): Promise<void> {
+  const all = state.get<Record<string, string>>(PINNED_SESSION_KEY, {});
+  const updated = { ...all };
+  if (sessionId) {
+    updated[codexHome] = sessionId;
+  } else {
+    delete updated[codexHome];
+  }
+  await state.update(PINNED_SESSION_KEY, updated);
+}
+
+type StoredSessionDecisions = Record<string, StoredReviewDecision>;
+type StoredHomeDecisions = Record<string, Record<string, StoredSessionDecisions>>;
+
+function reviewDecisions(
+  state: vscode.Memento,
+  codexHome: string,
+  sessionId: string,
+): StoredSessionDecisions {
+  const candidate = state.get<StoredHomeDecisions>(REVIEW_DECISIONS_KEY, {})[codexHome]?.[sessionId];
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return {};
+  }
+  const validated: StoredSessionDecisions = {};
+  for (const [fileKey, rawDecision] of Object.entries(candidate)) {
+    if (!rawDecision || typeof rawDecision !== "object" || Array.isArray(rawDecision)
+      || !("blockDecisions" in rawDecision)
+      || typeof rawDecision.blockDecisions !== "object"
+      || rawDecision.blockDecisions === null
+      || Array.isArray(rawDecision.blockDecisions)) {
+      continue;
+    }
+    const blockDecisions = Object.fromEntries(
+      Object.entries(rawDecision.blockDecisions)
+        .filter((entry): entry is [string, "keep" | "undo"] => entry[1] === "keep" || entry[1] === "undo"),
+    );
+    if (Object.keys(blockDecisions).length > 0) {
+      validated[fileKey] = { blockDecisions };
+    }
+  }
+  return validated;
+}
+
+async function saveReviewDecisions(
+  state: vscode.Memento,
+  codexHome: string,
+  sessionId: string,
+  decisions: StoredSessionDecisions,
+): Promise<void> {
+  const all = state.get<StoredHomeDecisions>(REVIEW_DECISIONS_KEY, {});
+  const sessions = all[codexHome] ?? {};
+  await state.update(REVIEW_DECISIONS_KEY, {
+    ...all,
+    [codexHome]: { ...sessions, [sessionId]: decisions },
+  });
 }
 
 function extensionHostKind(context: vscode.ExtensionContext): string {
@@ -98,6 +168,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const fileAccess = new WorkspaceFileAccess();
   const store = new ReviewStore(fileAccess);
+  let activePinnedSessionId: string | undefined;
+  let decisionSave = Promise.resolve();
+  const decisionSubscription = store.subscribe(() => {
+    const sessionId = activePinnedSessionId;
+    if (!sessionId) {
+      return;
+    }
+    const decisions = store.storedReviewDecisions();
+    decisionSave = decisionSave
+      .then(() => saveReviewDecisions(context.workspaceState, codexHome, sessionId, decisions))
+      .catch((error: unknown) => {
+        output.error(`Could not persist content-free review decisions: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  });
   const actionHistory = new ReviewActionHistory();
   const blockActionHistory = new ReviewBlockActionHistory();
   const virtualDocuments = new ReviewDocumentProvider(store);
@@ -106,7 +190,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const tree = new ReviewTreeProvider(store);
   const status = new ReviewStatusBar(store);
   context.subscriptions.push(
-    { dispose: () => { actionHistory.clear(); blockActionHistory.clear(); store.clear(); } },
+    { dispose: () => { activePinnedSessionId = undefined; decisionSubscription.dispose(); actionHistory.clear(); blockActionHistory.clear(); store.clear(); } },
     virtualDocuments,
     registerReviewDocumentProvider(virtualDocuments),
     renderer,
@@ -151,6 +235,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       output.error(`Could not create or present review state for a normalized change batch: ${error instanceof Error ? error.message : String(error)}`);
     });
   }));
+
+  const loadPinnedSession = async (sessionId: string): Promise<{ filePath: string; turnCount: number }> => {
+    await decisionSave;
+    const previousSessionId = activePinnedSessionId;
+    activePinnedSessionId = undefined;
+    try {
+      const history = await source.watchSessionById(sessionId);
+      actionHistory.clear();
+      blockActionHistory.clear();
+      await store.ingestSessionHistory(
+        history.batches,
+        reviewDecisions(context.workspaceState, codexHome, sessionId),
+      );
+      activePinnedSessionId = sessionId;
+      await saveReviewDecisions(context.workspaceState, codexHome, sessionId, store.storedReviewDecisions());
+      await closeArchivedInlineReviewTabs(store);
+      return { filePath: history.filePath, turnCount: store.allTurns().length };
+    } catch (error) {
+      activePinnedSessionId = previousSessionId;
+      throw error;
+    }
+  };
 
   const openDiff = async (file: ReviewFile): Promise<void> => virtualDocuments.openDiff(file);
   const openAcceptedDiff = async (file: ReviewFile): Promise<void> => virtualDocuments.openAcceptedDiff(file);
@@ -548,6 +654,66 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await vscode.commands.executeCommand("workbench.view.extension.codexInlineReview");
       await vscode.commands.executeCommand("codexInlineReview.pendingChanges.focus");
     }),
+    vscode.commands.registerCommand("codexInlineReview.watchSessionById", async () => {
+      const input = await vscode.window.showInputBox({
+        title: "Watch Codex Session by ID",
+        prompt: "Enter the Codex session UUID embedded in its rollout filename.",
+        value: pinnedSessionId(context.workspaceState, codexHome) ?? "",
+        validateInput: (value) => {
+          try {
+            normalizeSessionId(value);
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        },
+      });
+      if (!input) {
+        return;
+      }
+      try {
+        const normalized = normalizeSessionId(input);
+        const loaded = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Codex Review: loading session ${normalized}`,
+            cancellable: false,
+          },
+          () => loadPinnedSession(normalized),
+        );
+        await savePinnedSessionId(context.workspaceState, codexHome, normalized);
+        void vscode.window.showInformationMessage(
+          `Codex Review loaded ${loaded.turnCount} turn(s) and is now watching session ${normalized}.`,
+          "Show Diagnostics",
+        ).then((choice) => {
+          if (choice === "Show Diagnostics") {
+            void vscode.commands.executeCommand("codexInlineReview.showDiagnostics");
+          }
+        });
+        output.info(`Pinned rollout: ${loaded.filePath}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        output.error(`Could not pin Codex session: ${message}`);
+        void vscode.window.showErrorMessage(`Codex Review could not watch that session: ${message}`);
+      }
+    }),
+    vscode.commands.registerCommand("codexInlineReview.stopWatchingSessionById", async () => {
+      if (activePinnedSessionId) {
+        await decisionSave;
+        await saveReviewDecisions(
+          context.workspaceState,
+          codexHome,
+          activePinnedSessionId,
+          store.storedReviewDecisions(),
+        );
+      }
+      activePinnedSessionId = undefined;
+      const stopped = source.stopWatchingSessionById();
+      await savePinnedSessionId(context.workspaceState, codexHome);
+      void vscode.window.showInformationMessage(stopped
+        ? "Codex Review stopped watching the pinned session and resumed automatic discovery."
+        : "Codex Review is already using automatic session discovery.");
+    }),
     vscode.commands.registerCommand("codexInlineReview.importRecentEvents", async () => {
       let seconds = configuration().get<number>("importRecentSeconds", 0);
       if (seconds <= 0) {
@@ -579,6 +745,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         `Remote name: ${vscode.env.remoteName ?? "none"}`,
         `Resolved Codex home: ${codexHome}`,
         `Watched session directory: ${diagnostics.watchedSessionDirectory ?? "not started"}`,
+        `Watch mode: ${diagnostics.pinnedSessionId ? `pinned session ${diagnostics.pinnedSessionId}` : "automatic"}`,
+        `Pinned rollout: ${diagnostics.pinnedRollout ?? "none"}`,
+        `Tracked rollouts: ${diagnostics.trackedRollouts ?? 0}`,
         `Newest rollout discovered: ${diagnostics.newestRollout ?? "none"}`,
         `Last processed offset: ${diagnostics.lastProcessedOffset ?? "none"}`,
         `Pending reviews: ${store.activeFiles().length}`,
@@ -603,6 +772,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   if ((vscode.workspace.workspaceFolders?.length ?? 0) === 0) {
     output.warn("No workspace folder is open; rollout events will be ignored until a workspace is opened and the window is reloaded.");
+  }
+  const savedPinnedSessionId = pinnedSessionId(context.workspaceState, codexHome);
+  if (savedPinnedSessionId) {
+    try {
+      await loadPinnedSession(savedPinnedSessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.warn(`Saved pinned session could not be restored; automatic discovery will be used: ${message}`);
+      await savePinnedSessionId(context.workspaceState, codexHome);
+      void vscode.window.showWarningMessage(`Codex Review could not restore pinned session ${savedPinnedSessionId}; automatic discovery resumed.`);
+    }
   }
   const configuredRecentSeconds = configuration().get<number>("importRecentSeconds", 0);
   const recentSeconds = Number.isFinite(configuredRecentSeconds) ? Math.max(0, configuredRecentSeconds) : 0;

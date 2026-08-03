@@ -25,10 +25,18 @@
 21. Edit the same file in consecutive turns. Confirm each turn retains independent full and accepted snapshots.
 22. Try to reopen an archived inline review and confirm it remains unavailable while archival diffs still open.
 23. Append an incomplete JSON line to a disposable rollout copy, then complete it. Confirm processing occurs only after the newline. Rotate or truncate the copy and confirm no duplicate events appear.
+24. Continue an older session after a newer rollout exists. Confirm automatic mode captures newly appended edits from both sessions without importing their old history.
+25. Run **Codex Review: Watch Session by ID** and select an older rollout UUID. Confirm every completed file-change turn from that rollout appears, older turns are archived, only the last turn is interactive, and only subsequent edits from that session are tailed.
+26. Run **Codex Review: Stop Watching Session by ID** and confirm diagnostics report automatic mode and new edits from other recent sessions are captured again.
+27. Confirm the review sidebar title no longer contains global Keep All or Undo All buttons, while both commands remain available from the Command Palette.
+28. Open an inline review and confirm Keep Change has a green marker and Undo Change has a red marker.
+29. In a pinned session, keep one block, undo another, and leave a third unresolved. Reload the window and confirm the file is still Pending with the accepted subset and remaining control; resolve the last block and confirm it becomes Partially Accepted.
+30. Select a different session ID and confirm turns from the previous session leave the sidebar. Select the first ID again and confirm its stored review classifications return.
 
 ## Remote SSH
 
 1. Connect to an SSH workspace and install or enable the VSIX in the remote extension host.
-2. Confirm diagnostics show `workspace (remote)`, the remote name, and the remote user's Codex home and watched date directory.
+2. Confirm diagnostics show `workspace (remote)`, the remote name, the remote user's Codex home, watch mode, tracked rollout count, and watched date directory.
 3. Run Codex in the same remote environment and repeat the relevant review workflows above.
 4. Run Codex only on the local machine and confirm diagnostics explain that local rollout files are not visible to the remote extension host.
+5. Pin the active remote session by UUID, reload the remote window, and confirm its turn history and review classifications are restored before monitoring continues from the stored byte offset.

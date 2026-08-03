@@ -57,6 +57,13 @@ export interface ResolvedReviewBlock {
   block: ReviewBlock;
 }
 
+interface UnifiedDiffBlock {
+  oldStart: number;
+  oldLines: string[];
+  newStart: number;
+  newLines: string[];
+}
+
 interface ChangeSpan {
   start: number;
   end: number;
@@ -211,6 +218,99 @@ export function reverseApplyUnifiedDiff(postContent: string, unifiedDiff: string
     original: joinText({ lines: resultLines, eol: postContent.length > 0 ? post.eol : parsed.eol, finalNewline: originalFinalNewline }),
     hunks: parsed.hunks,
   };
+}
+
+function unifiedDiffBlocks(parsed: ParsedDiff): UnifiedDiffBlock[] {
+  const blocks: UnifiedDiffBlock[] = [];
+  for (const hunk of parsed.hunks) {
+    let oldLine = hunk.oldStart === 0 ? 0 : hunk.oldStart - 1;
+    let newLine = hunk.newStart === 0 ? 0 : hunk.newStart - 1;
+    for (let index = 0; index < hunk.lines.length;) {
+      const line = hunk.lines[index];
+      if (!line) {
+        break;
+      }
+      if (line.kind === "context") {
+        oldLine += 1;
+        newLine += 1;
+        index += 1;
+        continue;
+      }
+      const oldStart = oldLine;
+      const newStart = newLine;
+      const oldLines: string[] = [];
+      const newLines: string[] = [];
+      while (index < hunk.lines.length && hunk.lines[index]?.kind !== "context") {
+        const changed = hunk.lines[index];
+        if (!changed) {
+          break;
+        }
+        if (changed.kind === "remove") {
+          oldLines.push(changed.text);
+          oldLine += 1;
+        } else {
+          newLines.push(changed.text);
+          newLine += 1;
+        }
+        index += 1;
+      }
+      blocks.push({ oldStart, oldLines, newStart, newLines });
+    }
+  }
+  return blocks;
+}
+
+function linesMatch(lines: string[], start: number, expected: string[]): boolean {
+  return start >= 0
+    && start + expected.length <= lines.length
+    && expected.every((line, index) => lines[start + index] === line);
+}
+
+/**
+ * Rebuilds the complete post-edit side when the live file contains any mixture
+ * of old and new diff blocks. The final exact reverse-application validates all
+ * hunk context, positions, and newline markers before the result is accepted.
+ */
+export function materializePostFromMixedContent(content: string, unifiedDiff: string): string {
+  if (unifiedDiff.length === 0) {
+    return content;
+  }
+  const parsed = parseUnifiedDiff(unifiedDiff);
+  const result = splitText(content);
+  for (const block of unifiedDiffBlocks(parsed)) {
+    const position = block.newStart;
+    if (block.oldLines.length > 0 && block.newLines.length > 0) {
+      const matchesPost = linesMatch(result.lines, position, block.newLines);
+      const matchesOriginal = linesMatch(result.lines, position, block.oldLines);
+      if (!matchesPost && !matchesOriginal) {
+        throw new Error(`Mixed review content does not match either side of the change at new line ${position + 1}.`);
+      }
+      if (matchesOriginal && (!matchesPost || block.oldLines.length > block.newLines.length)) {
+        result.lines.splice(position, block.oldLines.length, ...block.newLines);
+      }
+    } else if (block.newLines.length > 0) {
+      if (!linesMatch(result.lines, position, block.newLines)) {
+        result.lines.splice(position, 0, ...block.newLines);
+      }
+    } else if (linesMatch(result.lines, position, block.oldLines)) {
+      result.lines.splice(position, block.oldLines.length);
+    }
+  }
+
+  const lastHunk = parsed.hunks.at(-1);
+  if (lastHunk) {
+    const newStart = lastHunk.newStart === 0 ? 0 : lastHunk.newStart - 1;
+    if (newStart + lastHunk.newCount === result.lines.length) {
+      if (lastHunk.newCount === 0 && result.lines.length === 0) {
+        result.finalNewline = false;
+      } else if (lastHunk.newCount > 0) {
+        result.finalNewline = !sideHasNoNewline(lastHunk, "new");
+      }
+    }
+  }
+  const postContent = joinText(result);
+  reverseApplyUnifiedDiff(postContent, unifiedDiff);
+  return postContent;
 }
 
 export function contentToUnifiedDiff(content: string, kind: "add" | "delete"): string {

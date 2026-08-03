@@ -228,3 +228,132 @@ test("resolved block state clears only after the final block", async () => {
   assert.equal(store.get(pending.key)?.status, "undone");
   assert.equal(store.findByUri(target), undefined);
 });
+
+test("session history loads every turn with only the latest turn pending", async () => {
+  const access = new MemoryAccess();
+  const target = uri("/workspace/history.txt");
+  access.set(target, "turn two\n");
+  const store = new ReviewStore(access);
+  const history = [
+    { ...batch("one", [{ uri: target, kind: "update" as const, unifiedDiff: "@@ -1 +1 @@\n-original\n+turn one\n" }]), timestamp: "2026-08-01T10:00:00Z" },
+    { ...batch("two", [{ uri: target, kind: "update" as const, unifiedDiff: "@@ -1 +1 @@\n-turn one\n+turn two\n" }]), timestamp: "2026-08-01T11:00:00Z" },
+  ];
+
+  await store.ingestSessionHistory(history);
+
+  assert.equal(store.allTurns().length, 2);
+  assert.equal(store.currentTurnId(), "two");
+  const oldFile = store.get(JSON.stringify(["one", target.toString()]))!;
+  const latestFile = store.get(JSON.stringify(["two", target.toString()]))!;
+  assert.equal(reviewCategory(oldFile), "accepted");
+  assert.equal(oldFile.fullOriginalContent, "original\n");
+  assert.equal(oldFile.fullPostContent, "turn one\n");
+  assert.equal(reviewCategory(latestFile), "pending");
+  assert.equal(latestFile.originalContent, "turn one\n");
+  assert.equal(latestFile.postContent, "turn two\n");
+});
+
+test("session history composes multiple patch events in one turn", async () => {
+  const access = new MemoryAccess();
+  const target = uri("/workspace/composed-history.txt");
+  access.set(target, "new first\nnew second\n");
+  const history = [
+    { ...batch("same", [{ uri: target, kind: "update" as const, unifiedDiff: "@@ -1,2 +1,2 @@\n-old first\n+new first\n old second\n" }]), eventId: "event-same-1" },
+    { ...batch("same", [{ uri: target, kind: "update" as const, unifiedDiff: "@@ -1,2 +1,2 @@\n new first\n-old second\n+new second\n" }]), eventId: "event-same-2" },
+  ];
+
+  const store = new ReviewStore(access);
+  await store.ingestSessionHistory(history);
+  const file = store.findByUri(target)!;
+  assert.equal(file.fullOriginalContent, "old first\nold second\n");
+  assert.equal(file.fullPostContent, "new first\nnew second\n");
+  assert.equal(computeReviewBlocks(file.originalContent ?? "", file.postContent ?? "").length, 1);
+});
+
+test("session history reconstructs an added file that a later turn deleted", async () => {
+  const access = new MemoryAccess();
+  const target = uri("/workspace/transient.txt");
+  access.set(target, null);
+  const history = [
+    { ...batch("add", [{ uri: target, kind: "add" as const, unifiedDiff: "@@ -0,0 +1 @@\n+created\n" }]), timestamp: "2026-08-01T10:00:00Z" },
+    { ...batch("delete", [{ uri: target, kind: "delete" as const, unifiedDiff: "@@ -1 +0,0 @@\n-created\n" }]), timestamp: "2026-08-01T11:00:00Z" },
+  ];
+
+  const store = new ReviewStore(access);
+  await store.ingestSessionHistory(history);
+  const added = store.get(JSON.stringify(["add", target.toString()]))!;
+  const deleted = store.get(JSON.stringify(["delete", target.toString()]))!;
+  assert.equal(added.fullOriginalContent, null);
+  assert.equal(added.fullPostContent, "created\n");
+  assert.equal(reviewCategory(added), "accepted");
+  assert.equal(deleted.fullOriginalContent, "created\n");
+  assert.equal(deleted.fullPostContent, null);
+  assert.equal(reviewCategory(deleted), "pending");
+});
+
+test("session history preserves current decisions and restores content-free decision metadata", async () => {
+  const access = new MemoryAccess();
+  const target = uri("/workspace/partial-history.txt");
+  const post = "new first\ncontext\nnew second\n";
+  access.set(target, post);
+  const history = [{
+    ...batch("latest", [{
+      uri: target,
+      kind: "update" as const,
+      unifiedDiff: "@@ -1,3 +1,3 @@\n-old first\n+new first\n context\n-old second\n+new second\n",
+    }]),
+    timestamp: "2026-08-01T12:00:00Z",
+  }];
+  const store = new ReviewStore(access);
+  await store.ingestSessionHistory(history);
+  const initial = store.findByUri(target)!;
+  const firstBlock = computeReviewBlocks(initial.originalContent ?? "", initial.postContent ?? "")[0]!;
+  assert.equal(store.keepBlock(initial.key, firstBlock.id), true);
+
+  await store.ingestSessionHistory(history);
+  const preserved = store.findByUri(target)!;
+  assert.equal(reviewCategory(preserved), "pending");
+  assert.equal(hasAcceptedChanges(preserved), true);
+
+  const decisions = store.storedReviewDecisions();
+  assert.deepEqual(Object.keys(decisions), [initial.key]);
+  assert.equal(JSON.stringify(decisions).includes("new first"), false);
+
+  const restored = new ReviewStore(access);
+  await restored.ingestSessionHistory(history, decisions);
+  const restoredFile = restored.findByUri(target)!;
+  assert.equal(reviewCategory(restoredFile), "pending");
+  assert.equal(hasAcceptedChanges(restoredFile), true);
+  assert.equal(computeReviewBlocks(restoredFile.originalContent ?? "", restoredFile.postContent ?? "").length, 1);
+});
+
+test("session history restores a partially accepted latest file after reload", async () => {
+  const access = new MemoryAccess();
+  const target = uri("/workspace/resolved-history.txt");
+  access.set(target, "new first\ncontext\nnew second\n");
+  const history = [{
+    ...batch("latest", [{
+      uri: target,
+      kind: "update" as const,
+      unifiedDiff: "@@ -1,3 +1,3 @@\n-old first\n+new first\n context\n-old second\n+new second\n",
+    }]),
+    timestamp: "2026-08-01T12:00:00Z",
+  }];
+  const originalStore = new ReviewStore(access);
+  await originalStore.ingestSessionHistory(history);
+  const file = originalStore.findByUri(target)!;
+  const kept = computeReviewBlocks(file.originalContent ?? "", file.postContent ?? "")[0]!;
+  assert.equal(originalStore.keepBlock(file.key, kept.id), true);
+  const remaining = originalStore.findByUri(target)!;
+  const undone = computeReviewBlocks(remaining.originalContent ?? "", remaining.postContent ?? "")[0]!;
+  assert.equal(originalStore.resolveUndoneBlock(remaining.key, undone.id), true);
+  access.set(target, "new first\ncontext\nold second\n");
+
+  const restoredStore = new ReviewStore(access);
+  await restoredStore.ingestSessionHistory(history, originalStore.storedReviewDecisions());
+  const restored = restoredStore.get(file.key)!;
+  assert.equal(reviewCategory(restored), "partiallyAccepted");
+  assert.equal(restoredStore.activeFiles().length, 0);
+  assert.equal(restored.originalContent, "new first\ncontext\nold second\n");
+  assert.equal(restored.postContent, "new first\ncontext\nold second\n");
+});

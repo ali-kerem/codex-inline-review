@@ -1,9 +1,16 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, type Stats } from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { JsonlTailer, fileIdentity, type TailCheckpoint } from "./jsonlTailer";
 import type { ChangeBatch, ChangeEventSource, SourceDiagnostics } from "./model";
 import { RolloutEventAdapter } from "./rolloutAdapter";
+import {
+  dateDirectory,
+  findRolloutBySessionId,
+  jsonlFiles,
+  normalizeSessionId,
+  recentRolloutFiles,
+} from "./rolloutDiscovery";
 import {
   batchPassesForkBoundary,
   inspectRolloutStart,
@@ -28,24 +35,12 @@ interface ForkInspection {
   parentLogicalEventIds?: Set<string>;
 }
 
-function dateDirectory(codexHome: string, date: Date): string {
-  const year = String(date.getFullYear()).padStart(4, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return path.join(codexHome, "sessions", year, month, day);
+export interface PinnedSessionHistory {
+  filePath: string;
+  batches: ChangeBatch[];
 }
 
-async function jsonlFiles(directory: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(directory, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl")).map((entry) => path.join(directory, entry.name));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
-}
+const AUTOMATIC_LOOKBACK_DAYS = 7;
 
 export class RolloutEventSource implements ChangeEventSource, vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<ChangeBatch>();
@@ -57,10 +52,13 @@ export class RolloutEventSource implements ChangeEventSource, vscode.Disposable 
   private stopped = true;
   private polling = false;
   private firstScan = true;
+  private startupDiscoveryPending = true;
   private activeDirectory = "";
   private newestRollout: string | undefined;
   private newestRolloutMtime = 0;
   private lastProcessedOffset: number | undefined;
+  private pinnedSessionId: string | undefined;
+  private pinnedRollout: string | undefined;
 
   public constructor(
     private readonly codexHome: string,
@@ -100,7 +98,84 @@ export class RolloutEventSource implements ChangeEventSource, vscode.Disposable 
       watchedSessionDirectory: this.activeDirectory || dateDirectory(this.codexHome, new Date()),
       ...(this.newestRollout ? { newestRollout: this.newestRollout } : {}),
       ...(this.lastProcessedOffset !== undefined ? { lastProcessedOffset: this.lastProcessedOffset } : {}),
+      trackedRollouts: this.tracked.size,
+      ...(this.pinnedSessionId ? { pinnedSessionId: this.pinnedSessionId } : {}),
+      ...(this.pinnedRollout ? { pinnedRollout: this.pinnedRollout } : {}),
     };
+  }
+
+  public async watchSessionById(value: string): Promise<PinnedSessionHistory> {
+    const sessionId = normalizeSessionId(value);
+    const filePath = await findRolloutBySessionId(this.codexHome, sessionId);
+    if (!filePath) {
+      throw new Error(`No Codex rollout was found for session ${sessionId}.`);
+    }
+    while (this.polling) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    this.polling = true;
+    try {
+      const stats = await fs.stat(filePath);
+      const siblingFiles = await jsonlFiles(path.dirname(filePath));
+      let inspection = await this.inspectFork(filePath, siblingFiles);
+      if (inspection.start.forkedFromId && !inspection.parentLogicalEventIds) {
+        const parentPath = await findRolloutBySessionId(this.codexHome, inspection.start.forkedFromId);
+        if (parentPath && parentPath !== filePath) {
+          try {
+            inspection = { ...inspection, parentLogicalEventIds: await rolloutLogicalEventIds(parentPath) };
+          } catch {
+            // History still loads; the normal fork timestamp boundary remains active.
+          }
+        }
+      }
+      const initial: TailCheckpoint = { identity: fileIdentity(stats), offset: 0 };
+      const result = await this.tailer.read(filePath, initial);
+      const batches: ChangeBatch[] = [];
+      const historyEvents = new Set<string>();
+      for (const line of result.lines) {
+        const batch = await this.adapter.adapt(line.text, line);
+        if (batch
+          && batchPassesForkBoundary(
+            batch.timestamp,
+            batch.logicalEventId,
+            inspection.start.forkTimestampMs,
+            inspection.parentLogicalEventIds,
+          )
+          && !historyEvents.has(batch.eventId)) {
+          historyEvents.add(batch.eventId);
+          batches.push(batch);
+          this.remember(batch.eventId);
+        }
+      }
+      this.tracked.set(filePath, {
+        checkpoint: result.checkpoint,
+        ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
+        ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
+        startInspectionPending: !inspection.start.complete,
+      });
+      this.pinnedSessionId = sessionId;
+      this.pinnedRollout = filePath;
+      this.lastProcessedOffset = result.checkpoint.offset;
+      this.observeNewest(filePath, stats.mtimeMs);
+      await this.persistCheckpoints();
+      this.output.appendLine(`Pinned Codex rollout session ${sessionId}: ${filePath} (${batches.length} completed change event(s) loaded).`);
+      return { filePath, batches };
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  public stopWatchingSessionById(): boolean {
+    if (!this.pinnedSessionId) {
+      return false;
+    }
+    const previous = this.pinnedSessionId;
+    this.pinnedSessionId = undefined;
+    this.pinnedRollout = undefined;
+    this.startupDiscoveryPending = true;
+    this.firstScan = true;
+    this.output.appendLine(`Stopped pinned watching for Codex session ${previous}; automatic discovery resumed.`);
+    return true;
   }
 
   public async importRecent(seconds: number): Promise<number> {
@@ -152,14 +227,12 @@ export class RolloutEventSource implements ChangeEventSource, vscode.Disposable 
             imported += 1;
           }
         }
-        if (directory === dateDirectory(this.codexHome, new Date())) {
-          this.tracked.set(filePath, {
-            checkpoint: result.checkpoint,
-            ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
-            ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
-            startInspectionPending: !inspection.start.complete,
-          });
-        }
+        this.tracked.set(filePath, {
+          checkpoint: result.checkpoint,
+          ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
+          ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
+          startInspectionPending: !inspection.start.complete,
+        });
       }
     }
     await this.persistCheckpoints();
@@ -179,8 +252,28 @@ export class RolloutEventSource implements ChangeEventSource, vscode.Disposable 
         this.activeDirectory = directory;
         this.firstScan = !isRollover;
       }
-      const files = await jsonlFiles(directory);
       const stored = this.checkpoints.load();
+      const candidates = new Set<string>();
+      if (this.pinnedRollout) {
+        candidates.add(this.pinnedRollout);
+      } else {
+        for (const filePath of await jsonlFiles(directory)) {
+          candidates.add(filePath);
+        }
+        for (const filePath of this.tracked.keys()) {
+          candidates.add(filePath);
+        }
+        if (this.startupDiscoveryPending) {
+          for (const filePath of Object.keys(stored)) {
+            candidates.add(filePath);
+          }
+          for (const filePath of await recentRolloutFiles(this.codexHome, new Date(), AUTOMATIC_LOOKBACK_DAYS)) {
+            candidates.add(filePath);
+          }
+          this.startupDiscoveryPending = false;
+        }
+      }
+      const files = [...candidates];
       for (const filePath of files) {
         let stats;
         try {
@@ -189,35 +282,7 @@ export class RolloutEventSource implements ChangeEventSource, vscode.Disposable 
           continue;
         }
         this.observeNewest(filePath, stats.mtimeMs);
-        let tracked = this.tracked.get(filePath);
-        if (!tracked) {
-          const saved = stored[filePath];
-          const identity = fileIdentity(stats);
-          const inspection = await this.inspectFork(filePath, files);
-          if (this.firstScan) {
-            tracked = {
-              checkpoint: await this.tailer.initialize(filePath, true),
-              ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
-              ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
-              startInspectionPending: !inspection.start.complete,
-            };
-          } else if (saved?.identity === identity && saved.offset <= stats.size) {
-            tracked = {
-              checkpoint: saved,
-              ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
-              ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
-              startInspectionPending: !inspection.start.complete,
-            };
-          } else {
-            tracked = {
-              checkpoint: await this.tailer.initialize(filePath, false),
-              ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
-              ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
-              startInspectionPending: !inspection.start.complete,
-            };
-          }
-          this.tracked.set(filePath, tracked);
-        }
+        const tracked = await this.ensureTracked(filePath, stats, files, stored, this.firstScan);
         if (tracked.startInspectionPending) {
           const inspection = await this.inspectFork(filePath, files);
           tracked.startInspectionPending = !inspection.start.complete;
@@ -255,6 +320,33 @@ export class RolloutEventSource implements ChangeEventSource, vscode.Disposable 
     } finally {
       this.polling = false;
     }
+  }
+
+  private async ensureTracked(
+    filePath: string,
+    stats: Stats,
+    siblingFiles: string[],
+    stored: Record<string, TailCheckpoint>,
+    startAtEnd: boolean,
+  ): Promise<TrackedRollout> {
+    const existing = this.tracked.get(filePath);
+    if (existing) {
+      return existing;
+    }
+    const saved = stored[filePath];
+    const identity = fileIdentity(stats);
+    const inspection = await this.inspectFork(filePath, siblingFiles);
+    const checkpoint = saved?.identity === identity && saved.offset <= stats.size
+      ? saved
+      : await this.tailer.initialize(filePath, startAtEnd);
+    const tracked: TrackedRollout = {
+      checkpoint,
+      ...(inspection.start.forkTimestampMs !== undefined ? { forkTimestampMs: inspection.start.forkTimestampMs } : {}),
+      ...(inspection.parentLogicalEventIds ? { parentLogicalEventIds: inspection.parentLogicalEventIds } : {}),
+      startInspectionPending: !inspection.start.complete,
+    };
+    this.tracked.set(filePath, tracked);
+    return tracked;
   }
 
   private observeNewest(filePath: string, mtimeMs: number): void {

@@ -5,6 +5,7 @@ import {
   computeReviewBlocks,
   computeReviewMarkers,
   contentToUnifiedDiff,
+  materializePostFromMixedContent,
   parseUnifiedDiff,
   resolveReviewBlock,
   reverseApplyUnifiedDiff,
@@ -45,6 +46,22 @@ test("handles empty additions and deletions", () => {
 
 test("rejects a non-exact post image", () => {
   assert.throws(() => reverseApplyUnifiedDiff("wrong\n", "@@ -1 +1 @@\n-old\n+new\n"), /does not match/u);
+});
+
+test("materializes the complete post side from partially accepted content", () => {
+  const diff = "@@ -1,5 +1,5 @@\n-old first\n+new first\n context\n-removed\n+replacement\n tail\n-old last\n+new last\n";
+  const mixed = "new first\ncontext\nremoved\ntail\nold last\n";
+  const post = "new first\ncontext\nreplacement\ntail\nnew last\n";
+  assert.equal(materializePostFromMixedContent(mixed, diff), post);
+  assert.equal(reverseApplyUnifiedDiff(post, diff).original, "old first\ncontext\nremoved\ntail\nold last\n");
+});
+
+test("materializes discarded insertions and deletions", () => {
+  const insertion = "@@ -1,2 +1,3 @@\n one\n+inserted\n two\n";
+  assert.equal(materializePostFromMixedContent("one\ntwo\n", insertion), "one\ninserted\ntwo\n");
+
+  const deletion = "@@ -1,3 +1,2 @@\n one\n-removed\n two\n";
+  assert.equal(materializePostFromMixedContent("one\nremoved\ntwo\n", deletion), "one\ntwo\n");
 });
 
 test("computes green lines and exact deleted blocks", () => {

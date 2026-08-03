@@ -23,6 +23,9 @@ export interface SourceDiagnostics {
   watchedSessionDirectory?: string;
   newestRollout?: string;
   lastProcessedOffset?: number;
+  trackedRollouts?: number;
+  pinnedSessionId?: string;
+  pinnedRollout?: string;
 }
 
 export interface ChangeEventSource {
