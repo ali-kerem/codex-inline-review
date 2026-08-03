@@ -119,8 +119,8 @@ export class ReviewCodeLensProvider implements vscode.CodeLensProvider, vscode.D
           const range = new vscode.Range(line, 0, line, 0);
           const argument = { key: file.key, blockId: block.id };
           return [
-            new vscode.CodeLens(range, { title: "$(check) Keep Change", command: "codexInlineReview.keepBlock", arguments: [argument] }),
-            new vscode.CodeLens(range, { title: "$(discard) Undo Change", command: "codexInlineReview.undoBlock", arguments: [argument] }),
+            new vscode.CodeLens(range, { title: "🟢 Keep Change", command: "codexInlineReview.keepBlock", arguments: [argument] }),
+            new vscode.CodeLens(range, { title: "🔴 Undo Change", command: "codexInlineReview.undoBlock", arguments: [argument] }),
           ];
         });
       }
