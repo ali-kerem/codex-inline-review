@@ -107,18 +107,6 @@
           "group": "navigation@30"
         }
       ],
-      "view/title": [
-        {
-          "command": "codexInlineReview.keepAll",
-          "when": "view == codexInlineReview.pendingChanges",
-          "group": "navigation@10"
-        },
-        {
-          "command": "codexInlineReview.undoAll",
-          "when": "view == codexInlineReview.pendingChanges",
-          "group": "navigation@11"
-        }
-      ],
       "view/item/context": [
         {
           "command": "codexInlineReview.keepTurn",
