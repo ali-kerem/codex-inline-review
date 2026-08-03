@@ -2,7 +2,7 @@
   "name": "codex-inline-review",
   "displayName": "Codex Inline Review (Experimental)",
   "description": "Review file edits from existing Codex sessions with inline decorations and safe Keep/Undo controls.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "experimental-local",
   "license": "MIT",
   "repository": {
