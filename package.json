@@ -28,7 +28,7 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "codexInlineReview.keepFile", "title": "Codex Review: Keep File", "icon": "$(check)" },
+      { "command": "codexInlineReview.keepFile", "title": "Codex Review: Keep File Changes", "icon": "$(check)" },
       { "command": "codexInlineReview.undoFile", "title": "Codex Review: Undo File", "icon": "$(discard)" },
       { "command": "codexInlineReview.keepBlock", "title": "Codex Review: Keep Change" },
       { "command": "codexInlineReview.undoBlock", "title": "Codex Review: Undo Change" },
