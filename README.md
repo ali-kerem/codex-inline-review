@@ -1,6 +1,6 @@
 # Codex Inline Review
 
-Codex Inline Review adds a review workflow for file edits made by the existing Codex extension in VS Code or Cursor. Use Codex normally, then inspect and resolve its changes from a dedicated sidebar—no separate chat or prompt flow required.
+Codex Inline Review adds a review workflow for file edits made by Codex in VS Code, Cursor, or the Codex CLI. Use Codex normally, then inspect and resolve its changes from a dedicated sidebar—no separate review client or prompt flow required.
 
 ## Features
 
@@ -38,7 +38,11 @@ Codex Inline Review adds a review workflow for file edits made by the existing C
 2. In VS Code or Cursor, run **Extensions: Install from VSIX...**.
 3. Select the downloaded file and reload the window.
 
-The existing Codex extension should already be installed and used in the same VS Code or Cursor environment.
+Use Codex through the existing VS Code or Cursor extension, or through Codex CLI in the same environment as the workspace extension host.
+
+## Codex CLI
+
+The extension can also review edits made through Codex CLI. The CLI and editor extension use the same persisted rollout JSONL event format, which Codex Inline Review observes to find completed file changes. Open the same workspace in VS Code or Cursor, and make sure Codex CLI and the workspace extension host use the same Codex home directory.
 
 ## Using the review sidebar
 
@@ -66,7 +70,7 @@ Pending files provide:
 - **Open Inline Review**
 - **Open Full Diff**
 - **Open Accepted Diff** when at least one block has been accepted
-- **Keep File**
+- **Keep File Changes**
 - **Discard File Changes**
 
 The active turn provides actions to keep, discard, or redo its changes. Workspace-wide **Keep All** and **Undo All** commands remain available from the Command Palette without occupying the sidebar title.
@@ -104,7 +108,7 @@ If reviews do not appear remotely, run **Codex Review: Show Diagnostics** to see
 
 ## Experimental status
 
-This is an experimental integration. It observes the session files written by the existing Codex extension, and that file format may change between Codex versions. The extension does not start another Codex client or require you to send prompts through a separate interface.
+This is an experimental integration. It observes persisted Codex session files, and that format may change between Codex versions. The extension does not start another Codex client or require you to send prompts through a separate interface.
 
 ## Development
 
